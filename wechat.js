@@ -405,26 +405,33 @@ app.post("/webhook", async (req, res) => {
     // Respond to WeChat immediately (5 second timeout requirement)
     res.send("success");
 
-    // Handle non-text messages
-    if (msgType !== "text") {
-      await sendWeChatMessage(openId, "您好！我只能处理文字消息。请发送文字描述您的问题。\n\nHi! I can only handle text messages.");
-      return;
-    }
+    // Process asynchronously after responding
+    setImmediate(async () => {
+      try {
+        // Handle non-text messages
+        if (msgType !== "text") {
+          await sendWeChatMessage(openId, "您好！我只能处理文字消息。请发送文字描述您的问题。\n\nHi! I can only handle text messages.");
+          return;
+        }
 
-    // Handle reset
-    if (content.toLowerCase() === "reset" || content === "重置") {
-      conversations[openId] = [];
-      await sendWeChatMessage(openId, "对话已重置！有什么可以帮到您的？\n\nFresh start! How can I help you?");
-      return;
-    }
+        // Handle reset
+        if (content.toLowerCase() === "reset" || content === "重置") {
+          conversations[openId] = [];
+          await sendWeChatMessage(openId, "对话已重置！有什么可以帮到您的？\n\nFresh start! How can I help you?");
+          return;
+        }
 
-    // Process with Claude and send response via Customer Service API
-    const zaraReply = await askClaude(openId, content);
-    await sendWeChatMessage(openId, zaraReply);
+        // Process with Claude and send response via Customer Service API
+        const zaraReply = await askClaude(openId, content);
+        await sendWeChatMessage(openId, zaraReply);
+      } catch (asyncErr) {
+        console.error("Async processing error:", asyncErr.message);
+      }
+    });
 
   } catch (err) {
     console.error("WeChat webhook error:", err.message);
-    res.send("success");
+    if (!res.headersSent) res.send("success");
   }
 });
 
