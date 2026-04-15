@@ -20,7 +20,7 @@ console.log("ANTHROPIC_API_KEY present:", !!ANTHROPIC_API_KEY);
 console.log("WECHAT_TOKEN present:", !!WECHAT_TOKEN);
 
 const conversations = {};
-const processedMessages = new Set(); // deduplication
+const processedMessages = new Set();
 
 const SYSTEM_PROMPT = `
 Your name is Zara. You are a warm, friendly legal assistant for Tez Law P.C. in West Covina, California.
@@ -221,8 +221,8 @@ const CACHE_TTL = {
   fees: 3 * 24 * 60 * 60 * 1000,
   general: 14 * 24 * 60 * 60 * 1000,
 };
-function detectCacheType(question) {
-  const q = question.toLowerCase();
+function detectCacheType(q) {
+  q = q.toLowerCase();
   if (q.includes("processing time") || q.includes("fee") || q.includes("cost") || q.includes("how long")) return "fees";
   if (q.includes("bia") || q.includes("case law") || q.includes("decision")) return "caselaw";
   if (q.includes("policy") || q.includes("uscis policy")) return "policy";
@@ -230,65 +230,29 @@ function detectCacheType(question) {
   return "general";
 }
 function loadCache() {
-  try { if (fs.existsSync(CACHE_FILE)) return JSON.parse(fs.readFileSync(CACHE_FILE, "utf8")); }
-  catch (e) {}
+  try { if (fs.existsSync(CACHE_FILE)) return JSON.parse(fs.readFileSync(CACHE_FILE, "utf8")); } catch (e) {}
   return {};
 }
 function saveCache(cache) {
   try { fs.writeFileSync(CACHE_FILE, JSON.stringify(cache, null, 2)); } catch (e) {}
 }
-function getCacheKey(message) {
-  return message.toLowerCase().trim().replace(/[^a-z0-9\s]/g, "").replace(/\s+/g, "_").substring(0, 100);
+function getCacheKey(msg) {
+  return msg.toLowerCase().trim().replace(/[^a-z0-9\s]/g, "").replace(/\s+/g, "_").substring(0, 100);
 }
-function getCachedAnswer(message) {
+function getCachedAnswer(msg) {
   const cache = loadCache();
-  const key = getCacheKey(message);
-  const entry = cache[key];
+  const entry = cache[getCacheKey(msg)];
   if (!entry) return null;
-  const ttl = CACHE_TTL[detectCacheType(message)];
-  if (Date.now() - entry.timestamp > ttl) return null;
+  if (Date.now() - entry.timestamp > CACHE_TTL[detectCacheType(msg)]) return null;
   return entry.answer;
 }
-function setCachedAnswer(message, answer) {
+function setCachedAnswer(msg, answer) {
   const cache = loadCache();
-  const key = getCacheKey(message);
-  cache[key] = { answer, timestamp: Date.now(), type: detectCacheType(message) };
+  cache[getCacheKey(msg)] = { answer, timestamp: Date.now(), type: detectCacheType(msg) };
   saveCache(cache);
 }
 
-// ── WeChat access token ───────────────────────────────────
-let wechatAccessToken = null;
-let tokenExpiry = 0;
-async function getAccessToken() {
-  if (wechatAccessToken && Date.now() < tokenExpiry) return wechatAccessToken;
-  const res = await axios.get(
-    `https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid=${WECHAT_APP_ID}&secret=${WECHAT_APP_SECRET}`
-  );
-  wechatAccessToken = res.data.access_token;
-  tokenExpiry = Date.now() + (res.data.expires_in - 60) * 1000;
-  console.log("✅ WeChat access token refreshed");
-  return wechatAccessToken;
-}
-
-// ── Send message via Customer Service API ─────────────────
-async function sendWeChatMessage(openId, content) {
-  try {
-    const token = await getAccessToken();
-    await axios.post(
-      `https://api.weixin.qq.com/cgi-bin/message/custom/send?access_token=${token}`,
-      {
-        touser: openId,
-        msgtype: "text",
-        text: { content }
-      }
-    );
-    console.log("✅ Sent WeChat message to:", openId);
-  } catch (err) {
-    console.error("WeChat send error:", err.response?.data || err.message);
-  }
-}
-
-// ── Claude API ────────────────────────────────────────────
+// ── Claude API (no web search — must respond within 5s) ───
 async function askClaude(userId, userMessage) {
   if (!conversations[userId]) conversations[userId] = [];
   conversations[userId].push({ role: "user", content: userMessage });
@@ -304,7 +268,7 @@ async function askClaude(userId, userMessage) {
     "https://api.anthropic.com/v1/messages",
     {
       model: "claude-sonnet-4-20250514",
-      max_tokens: 1024,
+      max_tokens: 800,
       system: SYSTEM_PROMPT,
       messages: recentHistory,
     },
@@ -317,17 +281,17 @@ async function askClaude(userId, userMessage) {
     }
   );
   const reply = response.data.content
-    .filter(block => block.type === "text")
-    .map(block => block.text)
-    .join("") || "请联系我们的团队获取帮助。电话: 626-678-8677";
+    .filter(b => b.type === "text")
+    .map(b => b.text)
+    .join("") || "请联系我们：626-678-8677 / jj@tezlawfirm.com";
   conversations[userId].push({ role: "assistant", content: reply });
   if (reply.length > 50) setCachedAnswer(userMessage, reply);
-  await checkAndNotifyLead(userId, userMessage, reply, "WeChat");
+  await checkAndNotifyLead(userId, userMessage, reply);
   return reply;
 }
 
 // ── Lead detection ────────────────────────────────────────
-async function checkAndNotifyLead(userId, userMessage, botReply, platform) {
+async function checkAndNotifyLead(userId, userMessage, botReply) {
   try {
     const phoneRegex = /(\+?1?\s?)?(\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4})/;
     const emailRegex = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/;
@@ -343,24 +307,34 @@ async function checkAndNotifyLead(userId, userMessage, botReply, platform) {
     if (TEAM_TELEGRAM_CHAT_ID && TELEGRAM_BOT_TOKEN) {
       await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
         chat_id: TEAM_TELEGRAM_CHAT_ID,
-        text: `🆕 New Lead from ${platform}!\n\n${phone ? `📞 Phone: ${phone}\n` : ""}${email ? `📧 Email: ${email}\n` : ""}\n💬 Recent chat:\n${recentMessages}\n\n⚡ Please follow up ASAP!`,
+        text: `🆕 New Lead from WeChat!\n\n${phone ? `📞 Phone: ${phone}\n` : ""}${email ? `📧 Email: ${email}\n` : ""}\n💬 Recent chat:\n${recentMessages}\n\n⚡ Please follow up ASAP!`,
         parse_mode: "Markdown"
       });
-      console.log(`✅ Lead notification sent — ${phone || email}`);
     }
   } catch (err) {
     console.error("Lead notification error:", err.message);
   }
 }
 
-// ── WeChat signature verification ────────────────────────
+// ── Signature verification ────────────────────────────────
 function verifySignature(token, timestamp, nonce, signature) {
   const arr = [token, timestamp, nonce].sort();
   const hash = crypto.createHash("sha1").update(arr.join("")).digest("hex");
   return hash === signature;
 }
 
-// ── WeChat webhook verification (GET) ────────────────────
+// ── Build XML reply ───────────────────────────────────────
+function buildXmlReply(toUser, fromUser, content) {
+  return `<xml>
+  <ToUserName><![CDATA[${toUser}]]></ToUserName>
+  <FromUserName><![CDATA[${fromUser}]]></FromUserName>
+  <CreateTime>${Math.floor(Date.now() / 1000)}</CreateTime>
+  <MsgType><![CDATA[text]]></MsgType>
+  <Content><![CDATA[${content}]]></Content>
+</xml>`;
+}
+
+// ── GET: WeChat webhook verification ─────────────────────
 app.get("/webhook", (req, res) => {
   const { signature, timestamp, nonce, echostr } = req.query;
   if (!signature) return res.status(403).send("Forbidden");
@@ -368,12 +342,12 @@ app.get("/webhook", (req, res) => {
     console.log("✅ WeChat webhook verified");
     res.send(echostr);
   } else {
-    console.log("❌ WeChat verification failed");
+    console.log("❌ Verification failed");
     res.status(403).send("Forbidden");
   }
 });
 
-// ── WeChat message handler (POST) ────────────────────────
+// ── POST: WeChat message handler ──────────────────────────
 app.post("/webhook", async (req, res) => {
   try {
     const { signature, timestamp, nonce } = req.query;
@@ -392,31 +366,30 @@ app.post("/webhook", async (req, res) => {
 
     console.log(`WeChat message from: ${openId} : ${content}`);
 
-    // Deduplicate — WeChat retries the same message multiple times
+    // Deduplicate retries
     if (processedMessages.has(msgId)) {
-      console.log("Duplicate message ignored:", msgId);
+      console.log("Duplicate ignored:", msgId);
       return res.send("success");
     }
     processedMessages.add(msgId);
-    // Clean up after 60 seconds
     setTimeout(() => processedMessages.delete(msgId), 60000);
 
-    // Handle non-text messages
+    // Non-text
     if (msgType !== "text") {
-      const reply = buildXmlReply(openId, toUser, "您好！我只能处理文字消息。请发送文字描述您的问题。\n\nHi! I can only handle text messages.");
+      const reply = buildXmlReply(openId, toUser, "您好！我只能处理文字消息。\n\nHi! Text messages only please.");
       res.set("Content-Type", "text/xml");
       return res.send(reply);
     }
 
-    // Handle reset
+    // Reset
     if (content.toLowerCase() === "reset" || content === "重置") {
       conversations[openId] = [];
-      const reply = buildXmlReply(openId, toUser, "对话已重置！有什么可以帮到您的？\n\nFresh start! How can I help you?");
+      const reply = buildXmlReply(openId, toUser, "对话已重置！有什么可以帮到您的？\n\nFresh start!");
       res.set("Content-Type", "text/xml");
       return res.send(reply);
     }
 
-    // Process with Claude (no web search to stay within 5s limit)
+    // Get Zara response and reply
     const zaraReply = await askClaude(openId, content);
     const xmlReply = buildXmlReply(openId, toUser, zaraReply);
     res.set("Content-Type", "text/xml");
@@ -424,16 +397,10 @@ app.post("/webhook", async (req, res) => {
 
   } catch (err) {
     console.error("WeChat webhook error:", err.message);
-    const errReply = buildXmlReply("unknown", "unknown", "抱歉，我遇到了技术问题。请致电 626-678-8677。\n\nSorry, technical issue. Please call 626-678-8677.");
     if (!res.headersSent) res.send("success");
   }
 });
 
-// ── Health check ──────────────────────────────────────────
-app.get("/", (req, res) => {
-  res.send("Zara WeChat bot running! 🤖");
-});
+app.get("/", (req, res) => res.send("Zara WeChat bot running! 🤖"));
 
-app.listen(PORT, () => {
-  console.log(`Zara WeChat bot running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Zara WeChat bot running on port ${PORT}`));
