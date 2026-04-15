@@ -306,7 +306,6 @@ async function askClaude(userId, userMessage) {
       model: "claude-sonnet-4-20250514",
       max_tokens: 1024,
       system: SYSTEM_PROMPT,
-      tools: [{ type: "web_search_20250305", name: "web_search" }],
       messages: recentHistory,
     },
     {
@@ -402,35 +401,30 @@ app.post("/webhook", async (req, res) => {
     // Clean up after 60 seconds
     setTimeout(() => processedMessages.delete(msgId), 60000);
 
-    // Respond to WeChat immediately (5 second timeout requirement)
-    res.send("success");
+    // Handle non-text messages
+    if (msgType !== "text") {
+      const reply = buildXmlReply(openId, toUser, "您好！我只能处理文字消息。请发送文字描述您的问题。\n\nHi! I can only handle text messages.");
+      res.set("Content-Type", "text/xml");
+      return res.send(reply);
+    }
 
-    // Process asynchronously after responding
-    setImmediate(async () => {
-      try {
-        // Handle non-text messages
-        if (msgType !== "text") {
-          await sendWeChatMessage(openId, "您好！我只能处理文字消息。请发送文字描述您的问题。\n\nHi! I can only handle text messages.");
-          return;
-        }
+    // Handle reset
+    if (content.toLowerCase() === "reset" || content === "重置") {
+      conversations[openId] = [];
+      const reply = buildXmlReply(openId, toUser, "对话已重置！有什么可以帮到您的？\n\nFresh start! How can I help you?");
+      res.set("Content-Type", "text/xml");
+      return res.send(reply);
+    }
 
-        // Handle reset
-        if (content.toLowerCase() === "reset" || content === "重置") {
-          conversations[openId] = [];
-          await sendWeChatMessage(openId, "对话已重置！有什么可以帮到您的？\n\nFresh start! How can I help you?");
-          return;
-        }
-
-        // Process with Claude and send response via Customer Service API
-        const zaraReply = await askClaude(openId, content);
-        await sendWeChatMessage(openId, zaraReply);
-      } catch (asyncErr) {
-        console.error("Async processing error:", asyncErr.message);
-      }
-    });
+    // Process with Claude (no web search to stay within 5s limit)
+    const zaraReply = await askClaude(openId, content);
+    const xmlReply = buildXmlReply(openId, toUser, zaraReply);
+    res.set("Content-Type", "text/xml");
+    res.send(xmlReply);
 
   } catch (err) {
     console.error("WeChat webhook error:", err.message);
+    const errReply = buildXmlReply("unknown", "unknown", "抱歉，我遇到了技术问题。请致电 626-678-8677。\n\nSorry, technical issue. Please call 626-678-8677.");
     if (!res.headersSent) res.send("success");
   }
 });
