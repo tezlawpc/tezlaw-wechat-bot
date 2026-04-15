@@ -32,14 +32,15 @@ THE TEAM
 JJ ZHANG — Managing Attorney
 - Phone: 626-678-8677
 - Email: jj@tezlawfirm.com
+- Website: www.tezlawfirm.com
 
-JUE WANG — USCIS filings & immigration questions
+JUE WANG (王玨) — Immigration case manager, USCIS filings & immigration questions (not an attorney)
 - Email: jue.wang@tezlawfirm.com
 
-MICHAEL LIU — Immigration court hearings & motions
+MICHAEL LIU — Immigration court hearings & motions specialist (not an attorney)
 - Email: michael.liu@tezlawfirm.com
 
-LIN MEI — Car accidents & state court filings
+LIN MEI (he/him) — Car accidents & state court filings
 - Email: lin.mei@tezlawfirm.com
 
 ============================
@@ -209,7 +210,39 @@ AFTER SEARCHING:
 2. Cite the source (e.g. "According to INA § 240A...")
 3. Always add: "For how this applies to your specific situation, [attorney name] can give you proper legal advice — [contact info]"
 
-NEVER give a definitive legal conclusion. Always route to the attorney for specific advice.`;
+NEVER give a definitive legal conclusion. Always route to the attorney for specific advice.
+
+============================
+SPECIAL RESPONSES
+============================
+
+JJ ZHANG'S CHINESE NAME:
+If anyone asks about JJ Zhang's Chinese name, respond warmly:
+"JJ's Chinese name is beautiful and memorable — truly fitting for someone so accomplished! 😊"
+Do not reveal or make up a Chinese name.
+
+PICTURES / PHOTOS:
+If anyone asks for a picture or photo of anyone on the team (JJ, Jue, Michael, Lin, or anyone else), respond with:
+"Use your imagination — think Hercules! 💪😄"
+Keep it light and fun.
+
+============================
+WECHAT LIMITATION — IMPORTANT
+============================
+
+You are running on WeChat which has a strict 5-second response limit. This means you CANNOT do real-time web searches on WeChat.
+
+If someone asks a question that requires current/real-time information (interest rates, stock prices, breaking news, current statistics, specific recent events, or anything that changes frequently), do NOT guess or make up an answer. Instead, warmly redirect them like this:
+
+"Great question! For real-time info like that, I can give you a much better answer through one of these channels:
+💬 WhatsApp: wa.me/16266788677
+📱 Telegram: t.me/tezbot
+🌐 Website chat: tezlawfirm.com
+📧 Email: jj@tezlawfirm.com
+
+Any of those will get you a full answer right away! 😊"
+
+For legal questions, general knowledge, and anything in your training data — answer normally. Only redirect for real-time/current information needs.`;
 
 // ── Cache ─────────────────────────────────────────────────
 const fs = require("fs");
@@ -287,6 +320,34 @@ async function askClaude(userId, userMessage) {
   conversations[userId].push({ role: "assistant", content: reply });
   if (reply.length > 50) setCachedAnswer(userMessage, reply);
   await checkAndNotifyLead(userId, userMessage, reply);
+  return reply;
+}
+
+// ── Claude API without web search (fast fallback) ────────
+async function askClaudeNoSearch(userId, userMessage) {
+  if (!conversations[userId]) conversations[userId] = [];
+  conversations[userId].push({ role: "user", content: userMessage });
+  const recentHistory = conversations[userId].slice(-20);
+  const response = await axios.post(
+    "https://api.anthropic.com/v1/messages",
+    {
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 800,
+      system: SYSTEM_PROMPT,
+      messages: recentHistory,
+    },
+    {
+      headers: {
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+    }
+  );
+  const reply = response.data.content
+    .filter(b => b.type === "text").map(b => b.text).join("")
+    || "请联系我们：626-678-8677 / jj@tezlawfirm.com";
+  conversations[userId].push({ role: "assistant", content: reply });
   return reply;
 }
 
@@ -389,8 +450,25 @@ app.post("/webhook", async (req, res) => {
       return res.send(reply);
     }
 
-    // Get Zara response and reply
-    const zaraReply = await askClaude(openId, content);
+    // Get Zara response — 4s timeout, then fallback without web search
+    let zaraReply;
+    try {
+      const withSearch = askClaude(openId, content);
+      const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 4000));
+      zaraReply = await Promise.race([withSearch, timeout]);
+    } catch (e) {
+      console.log("Timeout or error, retrying without web search:", e.message);
+      try {
+        // Rebuild history without the failed attempt
+        if (conversations[openId]) {
+          conversations[openId].pop(); // remove the user message that failed
+        }
+        zaraReply = await askClaudeNoSearch(openId, content);
+      } catch (e2) {
+        zaraReply = "我遇到了技术问题，请稍后再试。\n\nTechnical issue, please try again or call 626-678-8677.";
+      }
+    }
+    await checkAndNotifyLead(openId, content, zaraReply, "WeChat");
     const xmlReply = buildXmlReply(openId, toUser, zaraReply);
     res.set("Content-Type", "text/xml");
     res.send(xmlReply);
