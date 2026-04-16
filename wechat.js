@@ -78,7 +78,7 @@ Never ask all three at once.
 
 URGENT SITUATIONS (ICE detention, NTA, court date, serious accident):
 Keep it short and direct. Give the phone number immediately.
-Example: "That's urgent — please call JJ Zhang right now at 626-678-8677."
+Example: "That's urgent — please call us right now at 626-678-8677."
 
 ROUTING TO TEAM:
 Keep it brief and warm.
@@ -208,7 +208,22 @@ AFTER SEARCHING:
 2. Cite the source (e.g. "According to INA § 240A...")
 3. Always add: "For how this applies to your specific situation, [attorney name] can give you proper legal advice — [contact info]"
 
-NEVER give a definitive legal conclusion. Always route to the attorney for specific advice.`;
+NEVER give a definitive legal conclusion. Always route to the attorney for specific advice.
+
+============================
+DISTRESS DETECTION — CRITICAL
+============================
+
+HIGH URGENCY — respond with emergency message AND notify team:
+- ICE raid, detention, arrest (self or family)
+- Notice to appear / NTA
+- Car accident just happened / someone injured
+- Being deported / removal order
+- "I'm scared" / "please help me" / "I don't know what to do"
+- Court date is tomorrow
+
+FOR HIGH URGENCY: Acknowledge warmly, give 626-678-8677, say DO NOT sign anything.
+Example: "I hear you — this is serious and you're not alone. Please call us RIGHT NOW at 626-678-8677. Do NOT sign anything until you speak with an attorney."\`;
 
 
 // ── Welcome message ──────────────────────────────────────
@@ -403,6 +418,35 @@ async function checkAndNotifyLead(userId, userMessage, botReply, platform) {
   }
 }
 
+
+// ── Distress detection ────────────────────────────────────
+function detectDistress(message) {
+  const msg = message.toLowerCase();
+  const highUrgency = [
+    "ice", "detained", "arrested", "deportation", "deported", "removal",
+    "notice to appear", "nta", "they took", "raid", "emergency",
+    "scared", "please help", "don't know what to do", "help me",
+    "court tomorrow", "sign anything", "injured", "hospital",
+    "拘留", "被抓", "遣返", "紧急", "帮我", "害怕",
+    "detenido", "arrestado", "ayúdame", "miedo"
+  ];
+  if (highUrgency.some(kw => msg.includes(kw))) return "high";
+  return "none";
+}
+
+async function notifyTeamDistress(userId, userMessage, urgency, platform) {
+  try {
+    if (!TEAM_TELEGRAM_CHAT_ID || !TELEGRAM_BOT_TOKEN) return;
+    const emoji = urgency === "high" ? "🚨" : "⚠️";
+    await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      chat_id: TEAM_TELEGRAM_CHAT_ID,
+      text: `${emoji} HIGH URGENCY — ${platform}\n\nClient: "${userMessage.substring(0, 200)}"\n\nPlease follow up immediately! 📞 626-678-8677`
+    });
+  } catch (err) {
+    console.error("Distress notification error:", err.message);
+  }
+}
+
 // ── WeChat access token (cached) ─────────────────────────
 let wxTokenCache = { token: null, expiresAt: 0 };
 async function getWxAccessToken() {
@@ -524,6 +568,12 @@ app.post("/webhook", async (req, res) => {
         }
         const zaraReply = await askClaude(openId, content);
         await sendWxCustomerMsg(openId, zaraReply);
+
+        // Check for distress
+        const urgency = detectDistress(content);
+        if (urgency !== "none") {
+          await notifyTeamDistress(openId, content, urgency, "WeChat");
+        }
       } catch (e) {
         await sendWxCustomerMsg(openId, "抱歉，出现技术问题。请联系：626-678-8677\nTechnical issue. Please contact: 626-678-8677");
       }
