@@ -1,23 +1,20 @@
 const express = require("express");
 const axios = require("axios");
-const crypto = require("crypto");
-const xml2js = require("xml2js");
 
 const app = express();
-app.use(express.text({ type: "text/xml" }));
 app.use(express.json());
 
-const WECHAT_APP_ID = process.env.WECHAT_APP_ID;
-const WECHAT_APP_SECRET = process.env.WECHAT_APP_SECRET;
-const WECHAT_TOKEN = process.env.WECHAT_TOKEN;
+const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-const TEAM_TELEGRAM_CHAT_ID = process.env.TEAM_TELEGRAM_CHAT_ID;
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const PORT = process.env.PORT || 3000;
 
-console.log("WECHAT_APP_ID present:", !!WECHAT_APP_ID);
-console.log("WECHAT_APP_SECRET present:", !!WECHAT_APP_SECRET);
+console.log("WHATSAPP_TOKEN present:", !!WHATSAPP_TOKEN);
 console.log("ANTHROPIC_API_KEY present:", !!ANTHROPIC_API_KEY);
+console.log("PHONE_NUMBER_ID present:", !!PHONE_NUMBER_ID);
+console.log("PAGE_ACCESS_TOKEN present:", !!PAGE_ACCESS_TOKEN);
 
 const conversations = {};
 
@@ -214,15 +211,33 @@ NEVER give a definitive legal conclusion. Always route to the attorney for speci
 DISTRESS DETECTION — CRITICAL
 ============================
 
-HIGH URGENCY — respond with emergency message AND notify team:
-- ICE raid, detention, arrest (self or family)
-- Notice to appear / NTA
-- Car accident just happened / someone injured
-- Being deported / removal order
-- "I'm scared" / "please help me" / "I don't know what to do"
-- Court date is tomorrow
+ALWAYS watch for signs that a client is in crisis or distress. These situations require IMMEDIATE escalation to the team.
 
-FOR HIGH URGENCY: Acknowledge warmly, give 626-678-8677, say DO NOT sign anything.
+HIGH URGENCY — respond with emergency message AND notify team immediately:
+- ICE raid, detention, or arrest (self or family member)
+- "They took my husband/wife/child"
+- "I got a notice to appear" / NTA received
+- Car accident that just happened
+- Someone is injured right now
+- "I'm being deported" / removal order
+- Domestic violence situation
+- "I'm scared" / "I don't know what to do" / "please help me"
+- Court date is tomorrow or very soon
+- Criminal charges related to immigration
+
+MEDIUM URGENCY — respond with warm empathy + offer to connect with team:
+- Lost job due to immigration status
+- Visa expired or expiring soon
+- Denied benefits or application
+- Family separated
+- Emotional distress about case outcome
+
+FOR HIGH URGENCY situations, your response must:
+1. Acknowledge their distress warmly and immediately
+2. Give the firm's direct number: 626-678-8677
+3. Tell them NOT to sign anything without speaking to an attorney first
+4. Keep it SHORT and action-focused
+
 Example: "I hear you — this is serious and you're not alone. Please call us RIGHT NOW at 626-678-8677. Do NOT sign anything until you speak with an attorney."`;
 
 
@@ -328,9 +343,8 @@ function isLegalResearchQuestion(message) {
   return legalKeywords.some(kw => q.includes(kw));
 }
 
-
 // ── Claude API ────────────────────────────────────────────
-async function askClaude(userId, userMessage) {
+async function askClaude(userId, userMessage, platform) {
   if (!conversations[userId]) conversations[userId] = [];
   conversations[userId].push({ role: "user", content: userMessage });
   const recentHistory = conversations[userId].slice(-20);
@@ -350,7 +364,12 @@ async function askClaude(userId, userMessage) {
       model: "claude-sonnet-4-20250514",
       max_tokens: 1024,
       system: SYSTEM_PROMPT,
-      tools: [{ type: "web_search_20250305", name: "web_search" }],
+      tools: [
+        {
+          type: "web_search_20250305",
+          name: "web_search"
+        }
+      ],
       messages: recentHistory,
     },
     {
@@ -362,25 +381,25 @@ async function askClaude(userId, userMessage) {
     }
   );
 
+  // Extract text from response — may include tool use blocks
   const reply = response.data.content
     .filter(block => block.type === "text")
     .map(block => block.text)
-    .join("") || "请联系我们的团队获取帮助。电话: 626-678-8677";
-
+    .join("") || "Let me connect you with our team for that. Call us at 626-678-8677 or email jj@tezlawfirm.com.";
   conversations[userId].push({ role: "assistant", content: reply });
 
-  // Cache legal answers
+  // Cache legal research answers for future use
   if (isLegalResearchQuestion(userMessage) && reply.length > 50) {
     setCachedAnswer(userMessage, reply);
   }
 
-  // Check for lead info and notify team
-  await checkAndNotifyLead(userId, userMessage, reply, "WeChat");
+  // Check if user shared contact info and send lead notification
+  await checkAndNotifyLead(userId, userMessage, reply, platform || "WhatsApp/Messenger");
 
   return reply;
 }
 
-// ── Lead detection & Telegram notification ───────────────
+// ── Lead detection & email notification ──────────────────
 async function checkAndNotifyLead(userId, userMessage, botReply, platform) {
   try {
     const phoneRegex = /(\+?1?\s?)?(\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4})/;
@@ -395,11 +414,14 @@ async function checkAndNotifyLead(userId, userMessage, botReply, platform) {
     const email = hasEmail ? userMessage.match(emailRegex)?.[0] : null;
 
     const history = conversations[userId] || [];
-    const recentMessages = history.slice(-6).map(m =>
-      `${m.role === "user" ? "Client" : "Zara"}: ${m.content.substring(0, 100)}`
+    const recentMessages = history.slice(-10).map(m =>
+      `${m.role === "user" ? "Client" : "Zara"}: ${m.content}`
     ).join("\n");
 
-    if (TEAM_TELEGRAM_CHAT_ID && TELEGRAM_BOT_TOKEN) {
+    const TEAM_CHAT_ID = process.env.TEAM_TELEGRAM_CHAT_ID;
+    const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+
+    if (TEAM_CHAT_ID && TELEGRAM_BOT_TOKEN) {
       const message =
         `🆕 New Lead from ${platform}!\n\n` +
         `${phone ? `📞 Phone: ${phone}\n` : ""}` +
@@ -408,14 +430,83 @@ async function checkAndNotifyLead(userId, userMessage, botReply, platform) {
         `⚡ Please follow up ASAP!`;
 
       await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-        chat_id: TEAM_TELEGRAM_CHAT_ID,
+        chat_id: TEAM_CHAT_ID,
         text: message,
         parse_mode: "Markdown"
       });
-      console.log(`✅ Lead notification sent — ${phone || email}`);
+
+      console.log(`✅ Lead notification sent to team Telegram — ${phone || email}`);
+    } else {
+      console.log(`LEAD DETECTED on ${platform}: ${phone || email}`);
     }
   } catch (err) {
     console.error("Lead notification error:", err.message);
+  }
+}
+
+// ── WhatsApp sender ───────────────────────────────────────
+async function sendWhatsAppMessage(to, text) {
+  const url = `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`;
+  const response = await axios.post(url, {
+    messaging_product: "whatsapp",
+    to: to,
+    type: "text",
+    text: { body: text }
+  }, {
+    headers: {
+      "Authorization": `Bearer ${WHATSAPP_TOKEN}`,
+      "Content-Type": "application/json"
+    }
+  });
+  console.log("WhatsApp send status:", response.status);
+  return response;
+}
+
+// ── Facebook Messenger sender ─────────────────────────────
+async function sendMessengerMessage(recipientId, text) {
+  const PAGE_ID = process.env.PAGE_ID;
+  const url = `https://graph.facebook.com/v18.0/${PAGE_ID}/messages`;
+  const response = await axios.post(url, {
+    recipient: { id: recipientId },
+    message: { text: text }
+  }, {
+    headers: {
+      "Authorization": `Bearer ${PAGE_ACCESS_TOKEN}`,
+      "Content-Type": "application/json"
+    }
+  });
+  console.log("Messenger send status:", response.status);
+  return response;
+}
+
+// ── Process message (shared logic) ───────────────────────
+async function processMessage(userId, userText, sendFn, platform) {
+  const lowerText = userText.toLowerCase().trim();
+
+  if (["hi", "hello", "hey", "hola", "start", "你好"].includes(lowerText)) {
+    conversations[userId] = [];
+    await sendFn(WELCOME_MESSAGE);
+    return;
+  }
+
+  if (["contact", "team", "contacto"].includes(lowerText)) {
+    await sendFn(CONTACT_MESSAGE);
+    return;
+  }
+
+  if (lowerText === "reset") {
+    conversations[userId] = [];
+    await sendFn("Fresh start! What can I help you with? 😊");
+    return;
+  }
+
+  const reply = await askClaude(userId, userText, platform);
+  await sendFn(reply);
+
+  // Check for distress and notify team
+  const urgency = detectDistress(userText);
+  if (urgency !== "none") {
+    await notifyTeamDistress(userId, userText, urgency, platform);
   }
 }
 
@@ -426,176 +517,171 @@ function detectDistress(message) {
   const highUrgency = [
     "ice", "detained", "arrested", "deportation", "deported", "removal",
     "notice to appear", "nta", "they took", "raid", "emergency",
+    "accident just happened", "injured", "hospital", "bleeding",
     "scared", "please help", "don't know what to do", "help me",
-    "court tomorrow", "sign anything", "injured", "hospital",
+    "court tomorrow", "hearing tomorrow", "sign anything",
     "拘留", "被抓", "遣返", "紧急", "帮我", "害怕",
-    "detenido", "arrestado", "ayúdame", "miedo"
+    "detenido", "arrestado", "deportación", "ayúdame", "miedo"
+  ];
+  const mediumUrgency = [
+    "visa expired", "status expired", "out of status", "denied",
+    "lost my job", "fired", "separated", "family separated",
+    "worried", "desperate", "no options"
   ];
   if (highUrgency.some(kw => msg.includes(kw))) return "high";
+  if (mediumUrgency.some(kw => msg.includes(kw))) return "medium";
   return "none";
 }
 
 async function notifyTeamDistress(userId, userMessage, urgency, platform) {
   try {
-    if (!TEAM_TELEGRAM_CHAT_ID || !TELEGRAM_BOT_TOKEN) return;
+    const TEAM_CHAT_ID = process.env.TEAM_TELEGRAM_CHAT_ID;
+    const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+    if (!TEAM_CHAT_ID || !BOT_TOKEN) return;
     const emoji = urgency === "high" ? "🚨" : "⚠️";
-    await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-      chat_id: TEAM_TELEGRAM_CHAT_ID,
-      text: `${emoji} HIGH URGENCY — ${platform}\n\nClient: "${userMessage.substring(0, 200)}"\n\nPlease follow up immediately! 📞 626-678-8677`
+    const label = urgency === "high" ? "HIGH URGENCY" : "MEDIUM URGENCY";
+    await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+      chat_id: TEAM_CHAT_ID,
+      text: `${emoji} ${label} — ${platform}\n\nClient: "${userMessage.substring(0, 200)}"\n\nPlease follow up immediately! 📞 626-678-8677`
     });
+    console.log(`🚨 Distress notification sent (${urgency})`);
   } catch (err) {
     console.error("Distress notification error:", err.message);
   }
 }
 
-// ── WeChat access token (cached) ─────────────────────────
-let wxTokenCache = { token: null, expiresAt: 0 };
-async function getWxAccessToken() {
-  if (wxTokenCache.token && wxTokenCache.expiresAt > Date.now() + 300000) return wxTokenCache.token;
-  const resp = await axios.get("https://api.weixin.qq.com/cgi-bin/token", {
-    params: { grant_type: "client_credential", appid: WECHAT_APP_ID, secret: WECHAT_APP_SECRET }
-  });
-  wxTokenCache = { token: resp.data.access_token, expiresAt: Date.now() + (resp.data.expires_in * 1000) };
-  return wxTokenCache.token;
-}
-
-// ── Download WeChat media ─────────────────────────────────
-async function downloadWxMedia(mediaId) {
-  const token = await getWxAccessToken();
-  const resp = await axios.get("https://api.weixin.qq.com/cgi-bin/media/get", {
-    params: { access_token: token, media_id: mediaId },
+// ── WhatsApp media download ───────────────────────────────
+async function downloadWhatsAppMedia(mediaId) {
+  const metaResp = await axios.get(
+    `https://graph.facebook.com/v18.0/${mediaId}`,
+    { headers: { "Authorization": `Bearer ${WHATSAPP_TOKEN}` } }
+  );
+  const { url, mime_type } = metaResp.data;
+  const fileResp = await axios.get(url, {
+    headers: { "Authorization": `Bearer ${WHATSAPP_TOKEN}` },
     responseType: "arraybuffer"
   });
-  return Buffer.from(resp.data);
+  return { buffer: Buffer.from(fileResp.data), mimeType: mime_type };
 }
 
-// ── Send async reply via Customer Service API ─────────────
-async function sendWxCustomerMsg(openId, text) {
-  const token = await getWxAccessToken();
-  await axios.post(`https://api.weixin.qq.com/cgi-bin/message/custom/send?access_token=${token}`, {
-    touser: openId, msgtype: "text", text: { content: text.substring(0, 2000) }
-  });
+async function askClaudeWithMedia(userId, buffer, mediaType, caption, platform) {
+  const base64 = buffer.toString("base64");
+  const userPrompt = caption || "Please analyze this. If it's a legal document, explain what it is and what it means.";
+  const contentBlock = mediaType === "application/pdf"
+    ? { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } }
+    : { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } };
+
+  const response = await axios.post(
+    "https://api.anthropic.com/v1/messages",
+    {
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 1024,
+      system: SYSTEM_PROMPT,
+      messages: [{ role: "user", content: [contentBlock, { type: "text", text: userPrompt }] }]
+    },
+    { headers: { "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
+  );
+  const reply = response.data.content.filter(b => b.type === "text").map(b => b.text).join("") ||
+    "I had trouble reading that file. Please try again or contact us at 626-678-8677.";
+  if (!conversations[userId]) conversations[userId] = [];
+  conversations[userId].push({ role: "user", content: `[File sent] ${caption || ""}` });
+  conversations[userId].push({ role: "assistant", content: reply });
+  await checkAndNotifyLead(userId, caption || "", reply, platform);
+  return reply;
 }
 
-// ── WeChat signature verification ────────────────────────
-function verifySignature(token, timestamp, nonce, signature) {
-  const arr = [token, timestamp, nonce].sort();
-  const str = arr.join("");
-  const hash = crypto.createHash("sha1").update(str).digest("hex");
-  return hash === signature;
-}
-
-// ── Build XML reply for WeChat ────────────────────────────
-function buildXmlReply(toUser, fromUser, content) {
-  const timestamp = Math.floor(Date.now() / 1000);
-  return `<xml>
-  <ToUserName><![CDATA[${toUser}]]></ToUserName>
-  <FromUserName><![CDATA[${fromUser}]]></FromUserName>
-  <CreateTime>${timestamp}</CreateTime>
-  <MsgType><![CDATA[text]]></MsgType>
-  <Content><![CDATA[${content}]]></Content>
-</xml>`;
-}
-
-// ── WeChat webhook verification ──────────────────────────
-app.get("/webhook", (req, res) => {
-  const { signature, timestamp, nonce, echostr } = req.query;
-  console.log("WeChat verification attempt");
-
-  if (verifySignature(WECHAT_TOKEN, timestamp, nonce, signature)) {
-    console.log("✅ WeChat webhook verified");
-    res.send(echostr);
-  } else {
-    console.log("❌ WeChat webhook verification failed");
-    res.status(403).send("Forbidden");
-  }
-});
-
-// ── WeChat message handler ────────────────────────────────
+// ── Webhook receiver ──────────────────────────────────────
 app.post("/webhook", async (req, res) => {
-  try {
-    const { signature, timestamp, nonce } = req.query;
+  res.sendStatus(200);
+  const body = req.body;
+  console.log("Webhook received:", JSON.stringify(body).substring(0, 300));
 
-    if (!verifySignature(WECHAT_TOKEN, timestamp, nonce, signature)) {
-      return res.status(403).send("Forbidden");
-    }
+  // ── WhatsApp messages ─────────────────────────────────
+  if (body.object === "whatsapp_business_account") {
+    const message = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+    if (!message) return;
 
-    const parser = new xml2js.Parser({ explicitArray: false });
-    const result = await parser.parseStringPromise(req.body);
-    const msg = result.xml;
+    const from = message.from;
+    const messageType = message.type;
 
-    const openId = msg.FromUserName;
-    const toUser = msg.ToUserName;
-    const msgType = msg.MsgType;
-
-    // IMAGE — respond immediately then process async
-    if (msgType === "image") {
-      res.set("Content-Type", "text/xml");
-      res.send(buildXmlReply(openId, toUser, "📷 正在分析您的图片，请稍候...\nAnalyzing your image, one moment..."));
-
-      try {
-        const imageBuffer = await downloadWxMedia(msg.MediaId);
-        const base64 = imageBuffer.toString("base64");
-        const claudeResp = await axios.post("https://api.anthropic.com/v1/messages", {
-          model: "claude-sonnet-4-20250514", max_tokens: 1024,
-          system: SYSTEM_PROMPT,
-          messages: [{ role: "user", content: [
-            { type: "image", source: { type: "base64", media_type: "image/jpeg", data: base64 } },
-            { type: "text", text: "Analyze this image. If it's a legal document, explain what it is and what it means. Respond in Chinese if there's Chinese text, otherwise respond in English." }
-          ]}]
-        }, { headers: { "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } });
-        const reply = claudeResp.data.content.filter(b => b.type === "text").map(b => b.text).join("");
-        await sendWxCustomerMsg(openId, reply);
-      } catch (e) {
-        await sendWxCustomerMsg(openId, "抱歉，无法处理该图片。请联系我们：626-678-8677\nSorry, couldn't process that image. Please contact us: 626-678-8677");
+    try {
+      // IMAGE
+      if (messageType === "image") {
+        const { buffer, mimeType } = await downloadWhatsAppMedia(message.image.id);
+        const caption = message.image.caption || "";
+        const reply = await askClaudeWithMedia(from, buffer, mimeType, caption, "WhatsApp");
+        await sendWhatsAppMessage(from, reply);
+        return;
       }
+
+      // DOCUMENT (PDF)
+      if (messageType === "document") {
+        const { buffer, mimeType } = await downloadWhatsAppMedia(message.document.id);
+        const caption = message.document.caption || message.document.filename || "";
+        if (mimeType === "application/pdf") {
+          const reply = await askClaudeWithMedia(from, buffer, "application/pdf", caption, "WhatsApp");
+          await sendWhatsAppMessage(from, reply);
+        } else {
+          await sendWhatsAppMessage(from, "I can read images and PDF documents. Please send your document as a PDF or image.");
+        }
+        return;
+      }
+
+      // AUDIO/VOICE
+      if (messageType === "audio") {
+        await sendWhatsAppMessage(from, "I received your voice message! I can't process audio yet, but you can type your question and I'll help right away. 😊");
+        return;
+      }
+
+      // TEXT
+      if (messageType === "text") {
+        const userText = message.text.body;
+        console.log("WhatsApp from:", from, ":", userText);
+        await processMessage(from, userText, (text) => sendWhatsAppMessage(from, text), "WhatsApp");
+        return;
+      }
+
+      // OTHER
+      await sendWhatsAppMessage(from, "I can read text messages, images, and PDF documents. What can I help you with?");
+
+    } catch (err) {
+      console.error("WhatsApp error:", err.response?.data || err.message);
+      try {
+        await sendWhatsAppMessage(from, "Something went wrong — sorry! 😔\n📞 626-678-8677\n📧 jj@tezlawfirm.com");
+      } catch (e) { console.error("Failed to send error:", e.message); }
+    }
+    return;
+  }
+
+  // ── Facebook Messenger messages ───────────────────────
+  if (body.object === "page") {
+    const entry = body.entry?.[0];
+    const messagingEvent = entry?.messaging?.[0];
+    if (!messagingEvent || !messagingEvent.message) return;
+
+    const senderId = messagingEvent.sender.id;
+    const messageText = messagingEvent.message.text;
+
+    if (!messageText) {
+      await sendMessengerMessage(senderId, "Hey! I can read text messages right now. What's on your mind? 😊");
       return;
     }
 
-    // TEXT
-    if (msgType === "text") {
-      const content = msg.Content;
-      console.log(`WeChat from: ${openId} : ${content}`);
-
-      // Respond immediately to avoid 5-second timeout
-      res.send("success");
-
-      // Process async via customer service API
+    console.log("Messenger from:", senderId, ":", messageText);
+    try {
+      await processMessage(senderId, messageText, (text) => sendMessengerMessage(senderId, text), "Facebook Messenger");
+    } catch (err) {
+      console.error("Messenger error:", err.response?.data || err.message);
       try {
-        if (content.toLowerCase() === "reset" || content === "重置") {
-          conversations[openId] = [];
-          await sendWxCustomerMsg(openId, "对话已重置！有什么可以帮到您的？\nFresh start! How can I help you?");
-          return;
-        }
-        const zaraReply = await askClaude(openId, content);
-        await sendWxCustomerMsg(openId, zaraReply);
-
-        // Check for distress
-        const urgency = detectDistress(content);
-        if (urgency !== "none") {
-          await notifyTeamDistress(openId, content, urgency, "WeChat");
-        }
-      } catch (e) {
-        await sendWxCustomerMsg(openId, "抱歉，出现技术问题。请联系：626-678-8677\nTechnical issue. Please contact: 626-678-8677");
-      }
-      return;
+        await sendMessengerMessage(senderId, "Something went wrong — sorry! 😔\n📞 626-678-8677\n📧 jj@tezlawfirm.com");
+      } catch (e) { console.error("Failed to send error:", e.message); }
     }
-
-    // OTHER message types
-    res.set("Content-Type", "text/xml");
-    res.send(buildXmlReply(openId, toUser, "您好！请发送文字或图片。\nHi! Please send text or images."));
-
-  } catch (err) {
-    console.error("WeChat webhook error:", err.message);
-    res.send("success");
+    return;
   }
 });
 
-// ── Health check ──────────────────────────────────────────
-app.get("/", (req, res) => {
-  res.send("Zara WeChat Bot is running! 🤖");
-});
+app.get("/", (req, res) => res.send("Tez Law P.C. — Zara is running on WhatsApp & Facebook Messenger."));
 
 app.listen(PORT, () => {
-  console.log(`Zara WeChat bot running on port ${PORT}`);
+  console.log(`Zara bot running on port ${PORT}`);
 });
