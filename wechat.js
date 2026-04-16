@@ -223,7 +223,8 @@ HIGH URGENCY — respond with emergency message AND notify team:
 - Court date is tomorrow
 
 FOR HIGH URGENCY: Acknowledge warmly, give 626-678-8677, say DO NOT sign anything.
-Example: "I hear you — this is serious and you're not alone. Please call us RIGHT NOW at 626-678-8677. Do NOT sign anything until you speak with an attorney."\`;
+Example: "I hear you — this is serious and you're not alone. Please call us RIGHT NOW at 626-678-8677. Do NOT sign anything until you speak with an attorney."`;
+
 
 
 // ── Welcome message ──────────────────────────────────────
