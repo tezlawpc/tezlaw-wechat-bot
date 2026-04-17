@@ -686,7 +686,7 @@ app.post("/wechat", async (req, res) => {
     // ── Text message ──────────────────────────────────────
     if (msgType === "text") {
       // Respond within 5-second window then continue async
-      res.type("application/xml").send(xmlTextReply(fromUser, toUser, "💬 Processing..."));
+      res.send("success");
       await processMessage(fromUser, msg.Content?.trim() || "", (text) => sendWeChatMsg(fromUser, text), "WeChat");
       return;
     }
@@ -706,7 +706,7 @@ app.post("/wechat", async (req, res) => {
       }
 
       // No built-in recognition — download AMR + Whisper
-      res.type("application/xml").send(xmlTextReply(fromUser, toUser, "🎤 Got your voice message! Transcribing..."));
+      res.send("success");
       try {
         const { buffer } = await downloadWeChatMedia(msg.MediaId);
         const transcript  = await transcribeAudio(buffer, "voice.amr");
@@ -728,7 +728,7 @@ app.post("/wechat", async (req, res) => {
 
     // ── Image message ─────────────────────────────────────
     if (msgType === "image") {
-      res.type("application/xml").send(xmlTextReply(fromUser, toUser, "🖼️ Got your image! Analyzing..."));
+      res.send("success");
       try {
         const imgResp = await axios.get(msg.PicUrl, { responseType: "arraybuffer" });
         const base64   = Buffer.from(imgResp.data).toString("base64");
@@ -781,7 +781,7 @@ app.post("/webhook", async (req, res) => {
       return;
     }
     if (msgType === "text") {
-      res.type("application/xml").send(xmlTextReply(fromUser, toUser, "💬 Processing..."));
+      res.send("success");
       await processMessage(fromUser, msg.Content?.trim() || "", (text) => sendWeChatMsg(fromUser, text), "WeChat");
       return;
     }
@@ -794,7 +794,7 @@ app.post("/webhook", async (req, res) => {
         if (urgency !== "none") await notifyTeamDistress(fromUser, msg.Recognition, urgency, "WeChat Voice");
         return;
       }
-      res.type("application/xml").send(xmlTextReply(fromUser, toUser, "🎤 Got your voice message! Transcribing..."));
+      res.send("success");
       try {
         const { buffer } = await downloadWeChatMedia(msg.MediaId);
         const transcript = await transcribeAudio(buffer, "voice.amr");
@@ -811,7 +811,7 @@ app.post("/webhook", async (req, res) => {
       return;
     }
     if (msgType === "image") {
-      res.type("application/xml").send(xmlTextReply(fromUser, toUser, "🖼️ Got your image! Analyzing..."));
+      res.send("success");
       try {
         const imgResp = await axios.get(msg.PicUrl, { responseType: "arraybuffer" });
         const reply = await askClaudeWithMedia(fromUser, Buffer.from(imgResp.data), imgResp.headers["content-type"] || "image/jpeg", "", "WeChat");
