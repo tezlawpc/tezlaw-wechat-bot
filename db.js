@@ -7,15 +7,22 @@
 
 const { Pool } = require("pg");
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
-});
+let pool = null;
+
+function getPool() {
+  if (!pool) {
+    pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
+    });
+  }
+  return pool;
+}
 
 // ── Initialize tables on first run ──────────────────────────
 async function initDB() {
   try {
-    await pool.query(`
+    await getPool().query(`
       CREATE TABLE IF NOT EXISTS clients (
         id SERIAL PRIMARY KEY,
         platform VARCHAR(20) NOT NULL,       -- 'telegram' | 'whatsapp' | 'wechat'
@@ -29,7 +36,7 @@ async function initDB() {
       );
     `);
 
-    await pool.query(`
+    await getPool().query(`
       CREATE TABLE IF NOT EXISTS messages (
         id SERIAL PRIMARY KEY,
         platform VARCHAR(20) NOT NULL,
@@ -42,7 +49,7 @@ async function initDB() {
         ON messages(platform, platform_id, created_at DESC);
     `);
 
-    await pool.query(`
+    await getPool().query(`
       CREATE TABLE IF NOT EXISTS client_summaries (
         id SERIAL PRIMARY KEY,
         platform VARCHAR(20) NOT NULL,
@@ -62,7 +69,7 @@ async function initDB() {
 // ── Get or create client record ──────────────────────────────
 async function getOrCreateClient(platform, platformId, detectedLanguage = null) {
   try {
-    const res = await pool.query(
+    const res = await getPool().query(
       `INSERT INTO clients (platform, platform_id, preferred_language, last_seen)
        VALUES ($1, $2, $3, NOW())
        ON CONFLICT (platform, platform_id) DO UPDATE
@@ -90,7 +97,7 @@ async function updateClient(platform, platformId, updates = {}) {
     if (updates.case_type) { fields.push(`case_type = $${i++}`); values.push(updates.case_type); }
     if (updates.preferred_language) { fields.push(`preferred_language = $${i++}`); values.push(updates.preferred_language); }
     if (!fields.length) return;
-    await pool.query(
+    await getPool().query(
       `UPDATE clients SET ${fields.join(", ")} WHERE platform=$1 AND platform_id=$2`,
       values
     );
@@ -102,7 +109,7 @@ async function updateClient(platform, platformId, updates = {}) {
 // ── Save a message to history ────────────────────────────────
 async function saveMessage(platform, platformId, role, content) {
   try {
-    await pool.query(
+    await getPool().query(
       `INSERT INTO messages (platform, platform_id, role, content)
        VALUES ($1, $2, $3, $4)`,
       [platform, platformId, role, content.substring(0, 4000)] // cap at 4000 chars
@@ -115,7 +122,7 @@ async function saveMessage(platform, platformId, role, content) {
 // ── Get recent conversation history (last N messages) ────────
 async function getHistory(platform, platformId, limit = 10) {
   try {
-    const res = await pool.query(
+    const res = await getPool().query(
       `SELECT role, content FROM (
          SELECT role, content, created_at
          FROM messages
@@ -137,7 +144,7 @@ async function getHistory(platform, platformId, limit = 10) {
 // Keeps context window lean — summarizes anything older than 20 messages
 async function getClientContext(platform, platformId) {
   try {
-    const client = await pool.query(
+    const client = await getPool().query(
       `SELECT name, preferred_language, case_type, first_seen
        FROM clients WHERE platform=$1 AND platform_id=$2`,
       [platform, platformId]
@@ -146,7 +153,7 @@ async function getClientContext(platform, platformId) {
 
     const c = client.rows[0];
 
-    const summaryRow = await pool.query(
+    const summaryRow = await getPool().query(
       `SELECT summary FROM client_summaries
        WHERE platform=$1 AND platform_id=$2`,
       [platform, platformId]
@@ -165,7 +172,7 @@ async function getClientContext(platform, platformId) {
 // ── Save a Claude-generated summary ─────────────────────────
 async function saveSummary(platform, platformId, summary) {
   try {
-    await pool.query(
+    await getPool().query(
       `INSERT INTO client_summaries (platform, platform_id, summary, updated_at)
        VALUES ($1, $2, $3, NOW())
        ON CONFLICT (platform, platform_id) DO UPDATE
@@ -180,11 +187,11 @@ async function saveSummary(platform, platformId, summary) {
 // ── Clear history for a user (called on /reset) ──────────────
 async function clearHistory(platform, platformId) {
   try {
-    await pool.query(
+    await getPool().query(
       `DELETE FROM messages WHERE platform=$1 AND platform_id=$2`,
       [platform, platformId]
     );
-    await pool.query(
+    await getPool().query(
       `DELETE FROM client_summaries WHERE platform=$1 AND platform_id=$2`,
       [platform, platformId]
     );
@@ -197,7 +204,7 @@ async function clearHistory(platform, platformId) {
 // Call this after every 25 messages to keep DB lean
 async function maybeAutoSummarize(platform, platformId, anthropicApiKey) {
   try {
-    const countRes = await pool.query(
+    const countRes = await getPool().query(
       `SELECT COUNT(*) FROM messages WHERE platform=$1 AND platform_id=$2`,
       [platform, platformId]
     );
@@ -207,7 +214,7 @@ async function maybeAutoSummarize(platform, platformId, anthropicApiKey) {
     if (count < 25 || count % 25 !== 0) return;
 
     // Get all messages for summarization
-    const allMsgs = await pool.query(
+    const allMsgs = await getPool().query(
       `SELECT role, content FROM messages
        WHERE platform=$1 AND platform_id=$2
        ORDER BY created_at ASC
@@ -243,7 +250,7 @@ async function maybeAutoSummarize(platform, platformId, anthropicApiKey) {
     await saveSummary(platform, platformId, summary);
 
     // Delete oldest 20 messages to keep DB lean
-    await pool.query(
+    await getPool().query(
       `DELETE FROM messages WHERE id IN (
          SELECT id FROM messages
          WHERE platform=$1 AND platform_id=$2
