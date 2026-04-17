@@ -604,14 +604,26 @@ let wcToken = null;
 let wcTokenExpiry = 0;
 
 async function getWeChatToken() {
-  if (wcToken && Date.now() < wcTokenExpiry) return wcToken;
-  const resp = await axios.get(
-    `https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid=${WECHAT_APP_ID}&secret=${WECHAT_APP_SECRET}`
-  );
-  wcToken = resp.data.access_token;
-  wcTokenExpiry = Date.now() + (resp.data.expires_in - 60) * 1000;
-  console.log("✅ WeChat access token refreshed");
-  return wcToken;
+  // Use stable access token API — does not invalidate other tokens
+  // This is the recommended approach for production WeChat bots
+  try {
+    const resp = await axios.post(
+      "https://api.weixin.qq.com/cgi-bin/stable_token",
+      { grant_type: "client_credential", appid: WECHAT_APP_ID, secret: WECHAT_APP_SECRET }
+    );
+    if (resp.data.access_token) {
+      wcToken = resp.data.access_token;
+      wcTokenExpiry = Date.now() + (resp.data.expires_in - 60) * 1000;
+      console.log("✅ WeChat stable access token refreshed");
+      return wcToken;
+    }
+    console.error("getStableToken error:", JSON.stringify(resp.data));
+  } catch (err) {
+    console.error("getWeChatToken error:", err.message);
+  }
+  // Fallback to cached token if available
+  if (wcToken) return wcToken;
+  throw new Error("Could not obtain WeChat access token");
 }
 
 // ── Send message via Customer Service API (async, no 5s limit) ──
