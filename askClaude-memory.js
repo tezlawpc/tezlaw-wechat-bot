@@ -1,31 +1,23 @@
 // ============================================================
 //  askClaude-memory.js
-//  Drop-in replacement for the askClaude function in all three bots.
-//
-//  HOW TO USE:
-//  1. Add db.js to your bot repo
-//  2. Replace the old askClaude function with this one
-//  3. Call initDB() when the server starts
-//  4. Remove the old: const conversations = {};
+//  Zara brain with PostgreSQL memory + intake form integration
 // ============================================================
 
-const axios = require("axios");
-const db = require("./db");
+const axios  = require("axios");
+const db     = require("./db");
+const { checkIntake, resetIntake } = require("./intake");
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
-// ── Detect language from message ─────────────────────────────
 function detectLanguage(text) {
   if (/[\u4e00-\u9fff]/.test(text)) return "zh";
   if (/[\u0400-\u04ff]/.test(text)) return "ru";
   if (/[\uac00-\ud7af]/.test(text)) return "ko";
   if (/[\u3040-\u30ff]/.test(text)) return "ja";
-  // Spanish heuristic — common words
   if (/\b(hola|gracias|por favor|cómo|dónde|necesito|tengo|quiero|ayuda|abogado)\b/i.test(text)) return "es";
   return "en";
 }
 
-// ── Detect case type from message ────────────────────────────
 function detectCaseType(text) {
   const t = text.toLowerCase();
   if (/immigra|visa|green card|citizenship|deporta|asylum|daca|work permit|i-130|i-485|i-765/.test(t)) return "immigration";
@@ -36,98 +28,81 @@ function detectCaseType(text) {
   return null;
 }
 
-// ── Main askClaude with memory ───────────────────────────────
 async function askClaudeWithMemory(platform, platformId, userMessage, systemPrompt, options = {}) {
   const {
-    isImage = false,
-    imageData = null,
-    imageMediaType = null,
-    isPdf = false,
-    pdfData = null,
-    isVoiceTranscript = false,
+    isImage = false, imageData = null, imageMediaType = null,
+    isPdf = false, pdfData = null, isVoiceTranscript = false,
   } = options;
 
   try {
-    // 1. Ensure client exists, detect language
+    // 1. Check if intake flow should run FIRST (before Claude)
+    if (!isImage && !isPdf) {
+      const intake = await checkIntake(platform, platformId, userMessage);
+      if (intake.triggered) {
+        // Save messages to history so context is preserved
+        await db.saveMessage(platform, platformId, "user", userMessage);
+        await db.saveMessage(platform, platformId, "assistant", intake.message);
+        return intake.message;
+      }
+    }
+
+    // 2. Ensure client exists, detect language
     const lang = detectLanguage(userMessage);
     await db.getOrCreateClient(platform, platformId, lang);
 
-    // 2. Detect and save case type if found
+    // 3. Detect and save case type
     const caseType = detectCaseType(userMessage);
-    if (caseType) {
-      await db.updateClient(platform, platformId, { case_type: caseType });
-    }
+    if (caseType) await db.updateClient(platform, platformId, { case_type: caseType });
 
-    // 3. Save the incoming user message
-    const savedContent = isImage
-      ? "[Image sent]"
-      : isPdf
-      ? "[PDF document sent]"
-      : isVoiceTranscript
-      ? `[Voice message]: ${userMessage}`
+    // 4. Save incoming message
+    const savedContent = isImage ? "[Image sent]"
+      : isPdf ? "[PDF document sent]"
+      : isVoiceTranscript ? `[Voice message]: ${userMessage}`
       : userMessage;
-
     await db.saveMessage(platform, platformId, "user", savedContent);
 
-    // 4. Load client context (profile + summary + recent history)
+    // 5. Load client context
     const { client, summary, history } = await db.getClientContext(platform, platformId);
 
-    // 5. Build personalized system prompt
+    // 6. Build personalized system prompt
     let personalizedSystem = systemPrompt;
-
     if (client) {
-      let contextBlock = "\n\n── CLIENT MEMORY ──";
-      if (client.name) contextBlock += `\nClient name: ${client.name}`;
-      if (client.preferred_language && client.preferred_language !== "en") {
-        contextBlock += `\nPreferred language: ${client.preferred_language} — respond in this language`;
-      }
-      if (client.case_type) contextBlock += `\nCase type: ${client.case_type}`;
+      let ctx = "\n\n── CLIENT MEMORY ──";
+      if (client.name) ctx += `\nClient name: ${client.name}`;
+      if (client.preferred_language && client.preferred_language !== "en")
+        ctx += `\nPreferred language: ${client.preferred_language} — respond in this language`;
+      if (client.case_type) ctx += `\nCase type: ${client.case_type}`;
       if (client.first_seen) {
-        const firstSeen = new Date(client.first_seen);
-        const isReturning = (Date.now() - firstSeen) > 60 * 60 * 1000; // returning if > 1 hour
-        if (isReturning) contextBlock += `\nReturning client (first contact: ${firstSeen.toLocaleDateString()})`;
+        const isReturning = (Date.now() - new Date(client.first_seen)) > 60 * 60 * 1000;
+        if (isReturning) ctx += `\nReturning client (first contact: ${new Date(client.first_seen).toLocaleDateString()})`;
       }
-      if (summary) {
-        contextBlock += `\n\nConversation summary so far:\n${summary}`;
-      }
-      contextBlock += "\n── END MEMORY ──";
-      personalizedSystem += contextBlock;
+      if (summary) ctx += `\n\nConversation summary:\n${summary}`;
+      ctx += "\n── END MEMORY ──";
+      personalizedSystem += ctx;
     }
 
-    // 6. Build messages array — history + current message
+    // 7. Build messages array
     const messages = [];
-
-    // Add history (already ordered oldest → newest)
-    for (const msg of history.slice(-8)) { // keep last 8 exchanges
-      if (isImage && msg.role === "user" && msg.content === "[Image sent]") {
-        // Skip image placeholders in history — can't re-send images
-        continue;
-      }
+    for (const msg of history.slice(-8)) {
+      if (isImage && msg.role === "user" && msg.content === "[Image sent]") continue;
       messages.push({ role: msg.role, content: msg.content });
     }
 
-    // Add current user message
     if (isImage && imageData) {
-      messages.push({
-        role: "user",
-        content: [
-          { type: "image", source: { type: "base64", media_type: imageMediaType, data: imageData } },
-          { type: "text", text: userMessage || "Analyze this image. Respond in the same language as any text in the image, or in English if unclear." }
-        ]
-      });
+      messages.push({ role: "user", content: [
+        { type: "image", source: { type: "base64", media_type: imageMediaType, data: imageData } },
+        { type: "text", text: userMessage || "Analyze this image. Respond in the same language as any text in the image." }
+      ]});
     } else if (isPdf && pdfData) {
-      messages.push({
-        role: "user",
-        content: [
-          { type: "document", source: { type: "base64", media_type: "application/pdf", data: pdfData } },
-          { type: "text", text: userMessage || "Analyze this legal document and explain what it means in plain language." }
-        ]
-      });
+      messages.push({ role: "user", content: [
+        { type: "document", source: { type: "base64", media_type: "application/pdf", data: pdfData } },
+        { type: "text", text: userMessage || "Analyze this legal document and explain what it means in plain language." }
+      ]});
     } else {
       messages.push({ role: "user", content: userMessage });
     }
 
-    // 7. Call Claude API with web search tool
+    // 8. Call Claude
     const resp = await axios.post(
       "https://api.anthropic.com/v1/messages",
       {
@@ -147,22 +122,13 @@ async function askClaudeWithMemory(platform, platformId, userMessage, systemProm
       }
     );
 
-    // 8. Extract text response
     const reply = resp.data.content
-      .filter(b => b.type === "text")
-      .map(b => b.text)
-      .join("")
-      .trim() || "I'm sorry, I didn't catch that. Could you rephrase?";
+      .filter(b => b.type === "text").map(b => b.text).join("").trim()
+      || "I'm sorry, I didn't catch that. Could you rephrase?";
 
-    // 9. Save the assistant reply
+    // 9. Save reply + auto-summarize
     await db.saveMessage(platform, platformId, "assistant", reply);
-
-    // 10. Try to extract client name from conversation if not yet saved
-    if (!client?.name) {
-      tryExtractName(platform, platformId, userMessage);
-    }
-
-    // 11. Auto-summarize every 25 messages (non-blocking)
+    if (!client?.name) tryExtractName(platform, platformId, userMessage);
     db.maybeAutoSummarize(platform, platformId, ANTHROPIC_API_KEY).catch(() => {});
 
     return reply;
@@ -172,15 +138,9 @@ async function askClaudeWithMemory(platform, platformId, userMessage, systemProm
   }
 }
 
-// ── Attempt to extract client name from message ───────────────
-// Non-blocking — just a best-effort extraction
 function tryExtractName(platform, platformId, text) {
-  // Simple patterns: "my name is X", "I'm X", "This is X"
   const match = text.match(/(?:my name is|i'm|i am|this is)\s+([A-Z][a-z]+(?: [A-Z][a-z]+)?)/i);
-  if (match) {
-    const name = match[1].trim();
-    db.updateClient(platform, platformId, { name }).catch(() => {});
-  }
+  if (match) db.updateClient(platform, platformId, { name: match[1].trim() }).catch(() => {});
 }
 
 module.exports = { askClaudeWithMemory };
