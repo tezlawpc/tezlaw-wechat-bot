@@ -782,7 +782,14 @@ app.post("/webhook", async (req, res) => {
     }
     if (msgType === "text") {
       res.send("success");
-      await processMessage(fromUser, msg.Content?.trim() || "", (text) => sendWeChatMsg(fromUser, text), "WeChat");
+      try {
+        console.log(`Processing text from ${fromUser}: "${(msg.Content || "").substring(0, 50)}"`);
+        await processMessage(fromUser, msg.Content?.trim() || "", (text) => sendWeChatMsg(fromUser, text), "WeChat");
+        console.log(`Reply sent to ${fromUser}`);
+      } catch (err) {
+        console.error("processMessage error:", err.message, err.stack?.substring(0, 300));
+        try { await sendWeChatMsg(fromUser, "Sorry, something went wrong. Please call us at 626-678-8677."); } catch(e) {}
+      }
       return;
     }
     if (msgType === "voice") {
