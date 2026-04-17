@@ -1,23 +1,29 @@
-const express = require("express");
-const axios = require("axios");
-const { initDB, clearHistory } = require("./db");
-const { askClaudeWithMemory } = require("./askClaude-memory");
-const { transcribeAudio } = require("./whisper");
+const express  = require("express");
+const axios    = require("axios");
+const crypto   = require("crypto");
+const xml2js   = require("xml2js");
+const FormData = require("form-data");
+const { initDB, clearHistory }    = require("./db");
+const { askClaudeWithMemory }     = require("./askClaude-memory");
+const { transcribeAudio }         = require("./whisper");
 
 const app = express();
+app.use(express.text({ type: "text/xml" }));
 app.use(express.json());
 
-const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
-const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
+const ANTHROPIC_API_KEY      = process.env.ANTHROPIC_API_KEY;
+const WECHAT_TOKEN           = process.env.WECHAT_TOKEN;
+const WECHAT_APP_ID          = process.env.WECHAT_APP_ID;
+const WECHAT_APP_SECRET      = process.env.WECHAT_APP_SECRET;
+const OPENAI_API_KEY         = process.env.OPENAI_API_KEY;
+const TELEGRAM_BOT_TOKEN     = process.env.TELEGRAM_BOT_TOKEN;
+const TEAM_TELEGRAM_CHAT_ID  = process.env.TEAM_TELEGRAM_CHAT_ID;
+const RENDER_EXTERNAL_URL    = process.env.RENDER_EXTERNAL_URL;
 const PORT = process.env.PORT || 3000;
 
-console.log("WHATSAPP_TOKEN present:", !!WHATSAPP_TOKEN);
 console.log("ANTHROPIC_API_KEY present:", !!ANTHROPIC_API_KEY);
-console.log("PHONE_NUMBER_ID present:", !!PHONE_NUMBER_ID);
-console.log("PAGE_ACCESS_TOKEN present:", !!PAGE_ACCESS_TOKEN);
+console.log("WECHAT_TOKEN present:", !!WECHAT_TOKEN);
+console.log("WECHAT_APP_ID present:", !!WECHAT_APP_ID);
 
 const conversations = {};
 
@@ -593,125 +599,167 @@ async function askClaudeWithMedia(userId, buffer, mediaType, caption, platform) 
   return reply;
 }
 
-// ── Webhook receiver ──────────────────────────────────────
-app.post("/webhook", async (req, res) => {
-  res.sendStatus(200);
-  const body = req.body;
-  console.log("Webhook received:", JSON.stringify(body).substring(0, 300));
+// ── WeChat Access Token (cached, auto-refresh every 2h) ──
+let wcToken = null;
+let wcTokenExpiry = 0;
 
-  // ── WhatsApp messages ─────────────────────────────────
-  if (body.object === "whatsapp_business_account") {
-    const message = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
-    if (!message) return;
+async function getWeChatToken() {
+  if (wcToken && Date.now() < wcTokenExpiry) return wcToken;
+  const resp = await axios.get(
+    `https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid=${WECHAT_APP_ID}&secret=${WECHAT_APP_SECRET}`
+  );
+  wcToken = resp.data.access_token;
+  wcTokenExpiry = Date.now() + (resp.data.expires_in - 60) * 1000;
+  console.log("✅ WeChat access token refreshed");
+  return wcToken;
+}
 
-    const from = message.from;
-    const messageType = message.type;
-
-    try {
-      // IMAGE
-      if (messageType === "image") {
-        const { buffer, mimeType } = await downloadWhatsAppMedia(message.image.id);
-        const caption = message.image.caption || "";
-        const reply = await askClaudeWithMedia(from, buffer, mimeType, caption, "WhatsApp");
-        await sendWhatsAppMessage(from, reply);
-        return;
-      }
-
-      // DOCUMENT (PDF)
-      if (messageType === "document") {
-        const { buffer, mimeType } = await downloadWhatsAppMedia(message.document.id);
-        const caption = message.document.caption || message.document.filename || "";
-        if (mimeType === "application/pdf") {
-          const reply = await askClaudeWithMedia(from, buffer, "application/pdf", caption, "WhatsApp");
-          await sendWhatsAppMessage(from, reply);
-        } else {
-          await sendWhatsAppMessage(from, "I can read images and PDF documents. Please send your document as a PDF or image.");
-        }
-        return;
-      }
-
-      // AUDIO/VOICE
-      if (messageType === "audio") {
-        try {
-          await sendWhatsAppMessage(from, "🎤 Got your voice message! Transcribing...");
-          const { buffer, mimeType } = await downloadWhatsAppMedia(message.audio.id);
-          const ext = mimeType.includes("ogg") ? "ogg" : mimeType.includes("mp4") ? "m4a" : "ogg";
-          const transcript = await transcribeAudio(buffer, `voice.${ext}`);
-
-          if (!transcript) {
-            await sendWhatsAppMessage(from, "Sorry, I couldn't make out that voice message. Could you type your question instead?");
-            return;
-          }
-
-          await sendWhatsAppMessage(from, `🎤 I heard: "${transcript}"\n\nLet me help with that...`);
-          const reply = await askClaudeWithMemory("wechat", from, transcript, SYSTEM_PROMPT);
-          await sendWhatsAppMessage(from, reply);
-
-          const urgency = detectDistress(transcript);
-          if (urgency !== "none") {
-            await notifyTeamDistress(from, transcript, urgency, "WeChat Voice");
-          }
-        } catch (err) {
-          console.error("WeChat voice error:", err.message);
-          await sendWhatsAppMessage(from, "I had trouble with that voice message. Please type your question instead.");
-        }
-        return;
-      }
-
-      // TEXT
-      if (messageType === "text") {
-        const userText = message.text.body;
-        console.log("WhatsApp from:", from, ":", userText);
-        await processMessage(from, userText, (text) => sendWhatsAppMessage(from, text), "WhatsApp");
-        return;
-      }
-
-      // OTHER
-      await sendWhatsAppMessage(from, "I can read text messages, images, and PDF documents. What can I help you with?");
-
-    } catch (err) {
-      console.error("WhatsApp error:", err.response?.data || err.message);
-      try {
-        await sendWhatsAppMessage(from, "Something went wrong — sorry! 😔\n📞 626-678-8677\n📧 jj@tezlawfirm.com");
-      } catch (e) { console.error("Failed to send error:", e.message); }
-    }
-    return;
+// ── Send message via Customer Service API (async, no 5s limit) ──
+async function sendWeChatMsg(openId, text) {
+  const token = await getWeChatToken();
+  // WeChat 2000-char limit — split if needed
+  const chunks = [];
+  for (let i = 0; i < text.length; i += 1900) chunks.push(text.slice(i, i + 1900));
+  for (const chunk of chunks) {
+    await axios.post(
+      `https://api.weixin.qq.com/cgi-bin/message/custom/send?access_token=${token}`,
+      { touser: openId, msgtype: "text", text: { content: chunk } }
+    );
   }
+}
 
-  // ── Facebook Messenger messages ───────────────────────
-  if (body.object === "page") {
-    const entry = body.entry?.[0];
-    const messagingEvent = entry?.messaging?.[0];
-    if (!messagingEvent || !messagingEvent.message) return;
+// ── Download media from WeChat ────────────────────────────
+async function downloadWeChatMedia(mediaId) {
+  const token = await getWeChatToken();
+  const resp = await axios.get(
+    `https://api.weixin.qq.com/cgi-bin/media/get?access_token=${token}&media_id=${mediaId}`,
+    { responseType: "arraybuffer" }
+  );
+  const contentType = resp.headers["content-type"] || "audio/amr";
+  return { buffer: Buffer.from(resp.data), contentType };
+}
 
-    const senderId = messagingEvent.sender.id;
-    const messageText = messagingEvent.message.text;
+// ── XML text reply builder (for 5-second window) ─────────
+function xmlTextReply(toUser, fromUser, content) {
+  const now = Math.floor(Date.now() / 1000);
+  return `<xml>
+<ToUserName><![CDATA[${toUser}]]></ToUserName>
+<FromUserName><![CDATA[${fromUser}]]></FromUserName>
+<CreateTime>${now}</CreateTime>
+<MsgType><![CDATA[text]]></MsgType>
+<Content><![CDATA[${content}]]></Content>
+</xml>`;
+}
 
-    if (!messageText) {
-      await sendMessengerMessage(senderId, "Hey! I can read text messages right now. What's on your mind? 😊");
-      return;
-    }
-
-    console.log("Messenger from:", senderId, ":", messageText);
-    try {
-      await processMessage(senderId, messageText, (text) => sendMessengerMessage(senderId, text), "Facebook Messenger");
-    } catch (err) {
-      console.error("Messenger error:", err.response?.data || err.message);
-      try {
-        await sendMessengerMessage(senderId, "Something went wrong — sorry! 😔\n📞 626-678-8677\n📧 jj@tezlawfirm.com");
-      } catch (e) { console.error("Failed to send error:", e.message); }
-    }
-    return;
+// ── GET — WeChat webhook verification ────────────────────
+app.get("/wechat", (req, res) => {
+  const { signature, timestamp, nonce, echostr } = req.query;
+  const sorted = [WECHAT_TOKEN, timestamp, nonce].sort().join("");
+  const hash   = crypto.createHash("sha1").update(sorted).digest("hex");
+  if (hash === signature) {
+    console.log("✅ WeChat webhook verified");
+    res.send(echostr);
+  } else {
+    console.log("❌ WeChat verification failed");
+    res.status(403).send("Forbidden");
   }
 });
 
-app.get("/", (req, res) => res.send("Tez Law P.C. — Zara is running on WhatsApp & Facebook Messenger."));
+// ── POST — incoming WeChat messages ──────────────────────
+app.post("/wechat", async (req, res) => {
+  try {
+    const xml = await xml2js.parseStringPromise(req.body, { explicitArray: false });
+    const msg  = xml.xml;
 
+    const fromUser = msg.FromUserName;  // client's openId
+    const toUser   = msg.ToUserName;    // your Official Account ID
+    const msgType  = msg.MsgType;
+
+    console.log(`WeChat msg from ${fromUser}: type=${msgType}`);
+
+    // ── Subscribe event ───────────────────────────────────
+    if (msgType === "event" && msg.Event === "subscribe") {
+      res.type("application/xml").send(xmlTextReply(fromUser, toUser, WELCOME_MESSAGE));
+      return;
+    }
+
+    // ── Text message ──────────────────────────────────────
+    if (msgType === "text") {
+      // Respond within 5-second window then continue async
+      res.type("application/xml").send(xmlTextReply(fromUser, toUser, "💬 Processing..."));
+      await processMessage(fromUser, msg.Content?.trim() || "", (text) => sendWeChatMsg(fromUser, text), "WeChat");
+      return;
+    }
+
+    // ── Voice message ─────────────────────────────────────
+    if (msgType === "voice") {
+      // WeChat built-in Chinese recognition — use if available
+      if (msg.Recognition) {
+        res.type("application/xml").send(
+          xmlTextReply(fromUser, toUser, `🎤 I heard: "${msg.Recognition}"\n\nProcessing...`)
+        );
+        const reply = await askClaudeWithMemory("wechat", fromUser, msg.Recognition, SYSTEM_PROMPT);
+        await sendWeChatMsg(fromUser, reply);
+        const urgency = detectDistress(msg.Recognition);
+        if (urgency !== "none") await notifyTeamDistress(fromUser, msg.Recognition, urgency, "WeChat Voice");
+        return;
+      }
+
+      // No built-in recognition — download AMR + Whisper
+      res.type("application/xml").send(xmlTextReply(fromUser, toUser, "🎤 Got your voice message! Transcribing..."));
+      try {
+        const { buffer } = await downloadWeChatMedia(msg.MediaId);
+        const transcript  = await transcribeAudio(buffer, "voice.amr");
+        if (!transcript) {
+          await sendWeChatMsg(fromUser, "Sorry, I couldn\'t make out that voice message. Could you type your question instead?");
+          return;
+        }
+        await sendWeChatMsg(fromUser, `🎤 I heard: "${transcript}"\n\nLet me help with that...`);
+        const reply = await askClaudeWithMemory("wechat", fromUser, transcript, SYSTEM_PROMPT);
+        await sendWeChatMsg(fromUser, reply);
+        const urgency = detectDistress(transcript);
+        if (urgency !== "none") await notifyTeamDistress(fromUser, transcript, urgency, "WeChat Voice");
+      } catch (err) {
+        console.error("WeChat voice error:", err.message);
+        await sendWeChatMsg(fromUser, "I had trouble with that voice message. Please type your question instead, or call us at 626-678-8677.");
+      }
+      return;
+    }
+
+    // ── Image message ─────────────────────────────────────
+    if (msgType === "image") {
+      res.type("application/xml").send(xmlTextReply(fromUser, toUser, "🖼️ Got your image! Analyzing..."));
+      try {
+        const imgResp = await axios.get(msg.PicUrl, { responseType: "arraybuffer" });
+        const base64   = Buffer.from(imgResp.data).toString("base64");
+        const mimeType = imgResp.headers["content-type"] || "image/jpeg";
+        const reply = await askClaudeWithMedia(fromUser, Buffer.from(imgResp.data), mimeType, "", "WeChat");
+        await sendWeChatMsg(fromUser, reply);
+      } catch (err) {
+        console.error("WeChat image error:", err.message);
+        await sendWeChatMsg(fromUser, "I had trouble reading that image. Please describe what you need help with.");
+      }
+      return;
+    }
+
+    // ── Unsupported ───────────────────────────────────────
+    res.type("application/xml").send(xmlTextReply(fromUser, toUser,
+      "I support text, voice, and image messages. Type your question or send a voice message! 😊\n\n我支持文字、语音和图片消息。"
+    ));
+  } catch (err) {
+    console.error("WeChat handler error:", err.message);
+    res.send("success");
+  }
+});
+
+// ── Health check ──────────────────────────────────────────
+app.get("/", (req, res) => res.send("Tez Law P.C. — Zara WeChat Bot running ✅"));
+
+// ── Start server ──────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`Zara bot running on port ${PORT}`);
+  console.log(`🚀 WeChat bot running on port ${PORT}`);
   initDB();
-
-  const RENDER_URL = process.env.RENDER_EXTERNAL_URL || "https://tezlaw-wechat-bot.onrender.com";
-  setInterval(() => { axios.get(RENDER_URL).catch(() => {}); }, 4 * 60 * 1000);
-  console.log("Keep-alive ping started →", RENDER_URL);
+  const url = RENDER_EXTERNAL_URL || "https://tezlaw-wechat-bot.onrender.com";
+  setInterval(() => axios.get(url).catch(() => {}), 4 * 60 * 1000);
+  console.log("Keep-alive ping started →", url);
 });
