@@ -752,6 +752,26 @@ app.post("/wechat", async (req, res) => {
   }
 });
 
+
+// ── /webhook aliases (WeChat admin panel is configured to send here) ──
+app.get("/webhook", (req, res) => {
+  const { signature, timestamp, nonce, echostr } = req.query;
+  const sorted = [WECHAT_TOKEN, timestamp, nonce].sort().join("");
+  const hash = crypto.createHash("sha1").update(sorted).digest("hex");
+  if (hash === signature) {
+    console.log("✅ WeChat webhook verified at /webhook");
+    res.send(echostr);
+  } else {
+    res.status(403).send("Forbidden");
+  }
+});
+
+app.post("/webhook", (req, res, next) => {
+  // Alias for /wechat — same handler
+  req.url = "/wechat";
+  app.handle(req, res, next);
+});
+
 // ── Health check ──────────────────────────────────────────
 app.get("/", (req, res) => res.send("Tez Law P.C. — Zara WeChat Bot running ✅"));
 
