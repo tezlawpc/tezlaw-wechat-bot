@@ -1,5 +1,7 @@
 const express = require("express");
 const axios = require("axios");
+const { initDB, clearHistory } = require("./db");
+const { askClaudeWithMemory } = require("./askClaude-memory");
 
 const app = express();
 app.use(express.json());
@@ -274,7 +276,7 @@ const CONTACT_MESSAGE = `Here's the Tez Law P.C. team:
 
 // ── Smart Legal Research Cache ────────────────────────────
 const fs = require("fs");
-const CACHE_FILE = "/var/data/legal_cache.json";
+const CACHE_FILE = process.env.CACHE_PATH || "/tmp/legal_cache.json";
 
 const CACHE_TTL = {
   statute: 30 * 24 * 60 * 60 * 1000,
@@ -495,12 +497,12 @@ async function processMessage(userId, userText, sendFn, platform) {
   }
 
   if (lowerText === "reset") {
-    conversations[userId] = [];
+    await clearHistory("whatsapp", userId);
     await sendFn("Fresh start! What can I help you with? 😊");
     return;
   }
 
-  const reply = await askClaude(userId, userText, platform);
+  const reply = await askClaudeWithMemory("whatsapp", userId, userText, SYSTEM_PROMPT);
   await sendFn(reply);
 
   // Check for distress and notify team
@@ -684,4 +686,9 @@ app.get("/", (req, res) => res.send("Tez Law P.C. — Zara is running on WhatsAp
 
 app.listen(PORT, () => {
   console.log(`Zara bot running on port ${PORT}`);
+  initDB();
+
+  const RENDER_URL = process.env.RENDER_EXTERNAL_URL || "https://tezlaw-whatsapp-bot.onrender.com";
+  setInterval(() => { axios.get(RENDER_URL).catch(() => {}); }, 4 * 60 * 1000);
+  console.log("Keep-alive ping started →", RENDER_URL);
 });
