@@ -766,10 +766,64 @@ app.get("/webhook", (req, res) => {
   }
 });
 
-app.post("/webhook", (req, res, next) => {
-  // Alias for /wechat — same handler
-  req.url = "/wechat";
-  app.handle(req, res, next);
+app.post("/webhook", async (req, res) => {
+  // Direct alias — same logic as /wechat
+  try {
+    const xml = await xml2js.parseStringPromise(req.body, { explicitArray: false });
+    const msg  = xml.xml;
+    const fromUser = msg.FromUserName;
+    const toUser   = msg.ToUserName;
+    const msgType  = msg.MsgType;
+    console.log(`WeChat msg from ${fromUser}: type=${msgType}`);
+
+    if (msgType === "event" && msg.Event === "subscribe") {
+      res.type("application/xml").send(xmlTextReply(fromUser, toUser, WELCOME_MESSAGE));
+      return;
+    }
+    if (msgType === "text") {
+      res.type("application/xml").send(xmlTextReply(fromUser, toUser, "💬 Processing..."));
+      await processMessage(fromUser, msg.Content?.trim() || "", (text) => sendWeChatMsg(fromUser, text), "WeChat");
+      return;
+    }
+    if (msgType === "voice") {
+      if (msg.Recognition) {
+        res.type("application/xml").send(xmlTextReply(fromUser, toUser, `🎤 I heard: "${msg.Recognition}"\n\nProcessing...`));
+        const reply = await askClaudeWithMemory("wechat", fromUser, msg.Recognition, SYSTEM_PROMPT);
+        await sendWeChatMsg(fromUser, reply);
+        const urgency = detectDistress(msg.Recognition);
+        if (urgency !== "none") await notifyTeamDistress(fromUser, msg.Recognition, urgency, "WeChat Voice");
+        return;
+      }
+      res.type("application/xml").send(xmlTextReply(fromUser, toUser, "🎤 Got your voice message! Transcribing..."));
+      try {
+        const { buffer } = await downloadWeChatMedia(msg.MediaId);
+        const transcript = await transcribeAudio(buffer, "voice.amr");
+        if (!transcript) { await sendWeChatMsg(fromUser, "Sorry, I couldn\'t make out that voice message. Could you type your question instead?"); return; }
+        await sendWeChatMsg(fromUser, `🎤 I heard: "${transcript}"\n\nLet me help with that...`);
+        const reply = await askClaudeWithMemory("wechat", fromUser, transcript, SYSTEM_PROMPT);
+        await sendWeChatMsg(fromUser, reply);
+        const urgency = detectDistress(transcript);
+        if (urgency !== "none") await notifyTeamDistress(fromUser, transcript, urgency, "WeChat Voice");
+      } catch (err) {
+        console.error("WeChat voice error:", err.message);
+        await sendWeChatMsg(fromUser, "I had trouble with that voice message. Please type instead, or call 626-678-8677.");
+      }
+      return;
+    }
+    if (msgType === "image") {
+      res.type("application/xml").send(xmlTextReply(fromUser, toUser, "🖼️ Got your image! Analyzing..."));
+      try {
+        const imgResp = await axios.get(msg.PicUrl, { responseType: "arraybuffer" });
+        const reply = await askClaudeWithMedia(fromUser, Buffer.from(imgResp.data), imgResp.headers["content-type"] || "image/jpeg", "", "WeChat");
+        await sendWeChatMsg(fromUser, reply);
+      } catch (err) { await sendWeChatMsg(fromUser, "I had trouble reading that image. Please describe what you need help with."); }
+      return;
+    }
+    res.type("application/xml").send(xmlTextReply(fromUser, toUser, "I support text, voice, and image messages. 😊\n\n我支持文字、语音和图片消息。"));
+  } catch (err) {
+    console.error("WeChat /webhook handler error:", err.message);
+    res.send("success");
+  }
 });
 
 // ── Health check ──────────────────────────────────────────
