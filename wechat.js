@@ -617,14 +617,18 @@ async function getWeChatToken() {
 // ── Send message via Customer Service API (async, no 5s limit) ──
 async function sendWeChatMsg(openId, text) {
   const token = await getWeChatToken();
-  // WeChat 2000-char limit — split if needed
   const chunks = [];
   for (let i = 0; i < text.length; i += 1900) chunks.push(text.slice(i, i + 1900));
   for (const chunk of chunks) {
-    await axios.post(
-      `https://api.weixin.qq.com/cgi-bin/message/custom/send?access_token=${token}`,
-      { touser: openId, msgtype: "text", text: { content: chunk } }
-    );
+    try {
+      const r = await axios.post(
+        `https://api.weixin.qq.com/cgi-bin/message/custom/send?access_token=${token}`,
+        { touser: openId, msgtype: "text", text: { content: chunk } }
+      );
+      console.log(`sendWeChatMsg response: ${JSON.stringify(r.data)}`);
+    } catch (err) {
+      console.error(`sendWeChatMsg error: ${err.response?.data ? JSON.stringify(err.response.data) : err.message}`);
+    }
   }
 }
 
